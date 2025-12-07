@@ -736,11 +736,18 @@ class ZylchCLI:
 
 @click.command()
 @click.option('--server-url', help='Override server URL')
-def main(server_url):
+@click.option('--log', type=click.Choice(['debug', 'info', 'warning', 'error']), default='warning', help='Log level')
+def main(server_url, log):
     """Zylch - Your AI assistant for email and calendar."""
-    # Setup logging (suppress unless debug)
+    # Setup logging based on --log flag
+    log_levels = {
+        'debug': logging.DEBUG,
+        'info': logging.INFO,
+        'warning': logging.WARNING,
+        'error': logging.ERROR
+    }
     logging.basicConfig(
-        level=logging.WARNING,
+        level=log_levels.get(log, logging.WARNING),
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
 
