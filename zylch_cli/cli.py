@@ -341,12 +341,21 @@ class ZylchCLI:
 
                 # Send message to API
                 try:
-                    console.print("\n[dim]Thinking...[/dim]")
+                    import time
+                    start_time = time.time()
+
+                    # Show appropriate waiting message
+                    if user_input.startswith('/'):
+                        console.print(f"\n[dim]Running {user_input.split()[0]}...[/dim]")
+                    else:
+                        console.print("\n[dim]Thinking...[/dim]")
 
                     response = self.api_client.send_chat_message(
                         message=user_input,
                         session_id=session_id
                     )
+
+                    elapsed = time.time() - start_time
 
                     # Update session ID
                     session_id = response.get('session_id')
@@ -355,10 +364,11 @@ class ZylchCLI:
                     assistant_response = response.get('response', '')
                     console.print(f"\n[bold green]Zylch[/bold green]: {assistant_response}")
 
-                    # Show metadata if available
-                    metadata = response.get('metadata')
-                    if metadata and logger.level == logging.DEBUG:
-                        console.print(f"\n[dim]Metadata: {metadata}[/dim]")
+                    # Show timing for commands or in debug mode
+                    metadata = response.get('metadata', {})
+                    if user_input.startswith('/') or logger.level <= logging.DEBUG:
+                        server_time = metadata.get('execution_time_ms', 0) / 1000
+                        console.print(f"\n[dim]⏱ {elapsed:.1f}s total ({server_time:.1f}s server)[/dim]")
 
                 except ZylchAuthError:
                     console.print("\n❌ Session expired. Use /login to authenticate again.", style="red")
