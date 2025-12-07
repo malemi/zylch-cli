@@ -1,0 +1,36 @@
+[tool.poetry]
+name = "zylch-cli"
+version = "0.1.0"
+description = "Thin CLI client for Zylch AI - connects to Zylch API server"
+authors = ["Zylch Team"]
+readme = "README.md"
+packages = [{include = "zylch_cli"}]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+requests = "^2.31.0"
+pydantic = "^2.5.0"
+pydantic-settings = "^2.1.0"
+rich = "^13.7.0"
+click = "^8.1.7"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.4.3"
+pytest-asyncio = "^0.21.1"
+black = "^23.12.1"
+ruff = "^0.1.8"
+
+[tool.poetry.scripts]
+zylch = "zylch_cli.cli:main"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.black]
+line-length = 100
+target-version = ['py311']
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

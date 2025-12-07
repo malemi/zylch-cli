@@ -1,0 +1,11 @@
+#!/bin/bash
+# Zylch CLI launcher script
+
+# Get script directory
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+
+# Activate virtual environment
+source "$DIR/venv/bin/activate"
+
+# Run CLI
+python -m zylch_cli.cli "$@"
