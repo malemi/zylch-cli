@@ -491,3 +491,57 @@ class ZylchAPIClient:
             Success confirmation
         """
         return self._request("POST", "/api/auth/anthropic/revoke")
+
+    # Connections Management
+
+    def get_connections_status(self, include_unavailable: bool = True) -> Dict[str, Any]:
+        """Get status of all integration connections.
+
+        Args:
+            include_unavailable: Include "coming soon" providers
+
+        Returns:
+            Dict with connections list and counts
+        """
+        params = {"include_unavailable": str(include_unavailable).lower()}
+        return self._request("GET", "/api/connections/status", params=params)
+
+    def save_provider_credentials(
+        self,
+        provider_key: str,
+        credentials: Dict[str, Any],
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Save credentials for any provider (Vonage, Pipedrive, etc.).
+
+        Args:
+            provider_key: Provider identifier (vonage, pipedrive, etc.)
+            credentials: Dict of credential fields (api_key, api_secret, etc.)
+            metadata: Optional metadata (scopes, etc.)
+
+        Returns:
+            Success confirmation with provider info
+        """
+        payload = {"credentials": credentials}
+        if metadata:
+            payload["metadata"] = metadata
+
+        return self._request(
+            "POST",
+            f"/api/connections/provider/{provider_key}/credentials",
+            json=payload
+        )
+
+    def disconnect_provider(self, provider_key: str) -> Dict[str, Any]:
+        """Disconnect/revoke a provider connection.
+
+        Args:
+            provider_key: Provider identifier (vonage, pipedrive, etc.)
+
+        Returns:
+            Success confirmation
+        """
+        return self._request(
+            "DELETE",
+            f"/api/connections/provider/{provider_key}"
+        )

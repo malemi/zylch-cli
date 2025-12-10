@@ -13,11 +13,13 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.completion import Completer, Completion
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.keys import Keys
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Prompt
 
-from .config import load_config, save_config, CLIConfig, check_token_status
+from .config import load_config, save_config, CLIConfig, check_token_status, needs_token_refresh, refresh_firebase_token
 from .api_client import ZylchAPIClient, ZylchAPIError, ZylchAuthError
 from .local_storage import LocalStorage
 from .modifier_queue import ModifierQueue
@@ -87,6 +89,44 @@ class ZylchCLI:
             )
         return True
 
+    def try_refresh_token(self) -> bool:
+        """Try to refresh the session token if it's expiring soon.
+
+        Returns:
+            True if token is valid (either still valid or successfully refreshed)
+        """
+        if not self.config.session_token:
+            return False
+
+        # Check if refresh is needed
+        if not needs_token_refresh(self.config.session_token):
+            return True  # Token still valid, no refresh needed
+
+        # Try to refresh if we have a refresh token
+        if not self.config.refresh_token:
+            logger.debug("Token expiring but no refresh token available")
+            return False
+
+        logger.debug("Token expiring soon, attempting refresh...")
+        result = refresh_firebase_token(self.config.refresh_token)
+
+        if result:
+            new_token, new_refresh_token = result
+
+            # Update config
+            self.config.session_token = new_token
+            self.config.refresh_token = new_refresh_token
+            save_config(self.config)
+
+            # Update API client
+            self.api_client.set_token(new_token)
+
+            logger.debug("Token refreshed successfully")
+            return True
+        else:
+            logger.debug("Token refresh failed")
+            return False
+
     def login(self):
         """Login flow - opens browser for OAuth authentication."""
         console.print(Panel.fit(
@@ -116,12 +156,14 @@ class ZylchCLI:
 
             # Extract token data
             token = result.get('token')
+            refresh_token = result.get('refresh_token')
             owner_id = result.get('owner_id')
             email = result.get('email')
 
             if token:
-                # Save session
+                # Save session with refresh token
                 self.config.session_token = token
+                self.config.refresh_token = refresh_token or ''
                 self.config.owner_id = owner_id or ''
                 self.config.email = email or ''
                 save_config(self.config)
@@ -147,6 +189,7 @@ class ZylchCLI:
 
         # Clear local session
         self.config.session_token = ""
+        self.config.refresh_token = ""
         self.config.owner_id = ""
         self.config.email = ""
         save_config(self.config)
@@ -226,6 +269,10 @@ class ZylchCLI:
         console.print(Panel.fit(
             "[bold]Zylch AI Chat[/bold]\n\n"
             "Chat with your AI assistant.\n\n"
+            "[bold]Input:[/bold]\n"
+            "  Enter          Send message\n"
+            "  Ctrl+J         New line\n"
+            "  Paste          Multiline text supported\n\n"
             "[bold]Commands:[/bold]\n"
             "  /login     Login to Zylch\n"
             "  /logout    Logout from Zylch\n"
@@ -248,32 +295,82 @@ class ZylchCLI:
 
         class CommandCompleter(Completer):
             """Custom completer for slash commands."""
-            commands = [
-                # Client-side commands
-                '/login', '/logout', '/status', '/new', '/quit', '/exit',
-                '/connect', '/connect google', '/connect anthropic', '/connect microsoft', '/connect --reset',
-                # Server-side commands (sent to backend)
-                '/help', '/sync', '/gaps', '/briefing',
-                '/archive', '/archive --help', '/archive --stats', '/archive --init', '/archive --sync', '/archive --search',
-                '/cache', '/cache --help', '/cache --clear',
-                '/memory', '/memory --help', '/memory --list', '/memory --stats', '/memory --add',
-                '/model', '/model haiku', '/model sonnet', '/model opus', '/model auto',
-                '/trigger', '/trigger --help', '/trigger --list', '/trigger --add', '/trigger --remove', '/trigger --types',
-                '/mrcall', '/mrcall --help',
-                '/share', '/revoke', '/sharing',
-                '/tutorial',
-            ]
+            def __init__(self, api_client):
+                self.api_client = api_client
+                self.base_commands = [
+                    # Client-side commands
+                    '/login', '/logout', '/status', '/new', '/quit', '/exit',
+                    '/connect', '/connect --reset',
+                    # Server-side commands (sent to backend)
+                    '/help', '/sync', '/gaps', '/briefing',
+                    '/archive', '/archive --help', '/archive --stats', '/archive --init', '/archive --sync', '/archive --search',
+                    '/cache', '/cache --help', '/cache --clear',
+                    '/memory', '/memory --help', '/memory --list', '/memory --stats', '/memory --add',
+                    '/model', '/model haiku', '/model sonnet', '/model opus', '/model auto',
+                    '/trigger', '/trigger --help', '/trigger --list', '/trigger --add', '/trigger --remove', '/trigger --types',
+                    '/mrcall', '/mrcall --help',
+                    '/share', '/revoke', '/sharing',
+                    '/tutorial',
+                ]
+                self.connect_commands = []
+                self._load_connect_commands()
+
+            def _load_connect_commands(self):
+                """Load /connect provider commands from API."""
+                try:
+                    # Only load if authenticated (avoid 401 errors during login flow)
+                    if self.api_client and hasattr(self.api_client, 'get_connections_status'):
+                        # Check if we have an auth token before making the request
+                        if 'Authorization' not in self.api_client.session.headers:
+                            return  # Skip if not authenticated yet
+
+                        status_data = self.api_client.get_connections_status(include_unavailable=False)
+                        providers = status_data.get('connections', [])
+                        for provider in providers:
+                            if provider.get('is_available'):
+                                self.connect_commands.append(f"/connect {provider['provider_key']}")
+                except Exception:
+                    # Fallback to empty if API fails
+                    pass
 
             def get_completions(self, document, complete_event):
                 text = document.text_before_cursor.lower()
-                for cmd in self.commands:
+                all_commands = self.base_commands + self.connect_commands
+                for cmd in all_commands:
                     if cmd.lower().startswith(text):
                         yield Completion(cmd, start_position=-len(text))
+
+        # Key bindings for multiline input
+        # - Enter: submit (unless Shift/Alt held)
+        # - Shift+Enter or Alt+Enter: insert newline
+        kb = KeyBindings()
+
+        @kb.add(Keys.Enter)
+        def handle_enter(event):
+            """Submit on Enter (single line or end of multiline)."""
+            buf = event.app.current_buffer
+            # If text is empty or doesn't look like it needs continuation, submit
+            text = buf.text
+            # Submit the input
+            buf.validate_and_handle()
+
+        @kb.add('escape', 'enter')  # Option+Enter on macOS (Esc then Enter)
+        def handle_option_enter(event):
+            """Insert newline on Option+Enter (or Esc then Enter)."""
+            event.app.current_buffer.insert_text('\n')
+
+        @kb.add('c-j')  # Control+J (universal newline)
+        def handle_ctrl_j(event):
+            """Insert newline on Control+J."""
+            event.app.current_buffer.insert_text('\n')
+
 
         prompt_session = PromptSession(
             history=FileHistory(str(history_file)),
             auto_suggest=AutoSuggestFromHistory(),
-            completer=CommandCompleter()
+            completer=CommandCompleter(self.api_client),
+            key_bindings=kb,
+            multiline=True
         )
 
         try:
@@ -337,6 +434,12 @@ class ZylchCLI:
                 # Check auth before sending message
                 if not self.config.session_token:
                     console.print("\n❌ Not logged in. Use /login first.", style="red")
+                    continue
+
+                # Try to refresh token if expiring soon
+                if not self.try_refresh_token():
+                    # Token expired and couldn't refresh
+                    console.print("\n❌ Session expired. Use /login to authenticate again.", style="red")
                     continue
 
                 # Send message to API
@@ -494,59 +597,71 @@ class ZylchCLI:
             self._show_connection_status()
             return
 
-        # Handle specific service
+        # Route to specific service handlers
         service_lower = service.lower()
+
         if service_lower == 'google':
             self._connect_google()
         elif service_lower == 'microsoft':
             self._connect_microsoft()
         elif service_lower == 'anthropic':
             self._connect_anthropic()
+        elif service_lower in ['vonage', 'pipedrive']:
+            self._connect_api_key_service(service_lower)
         else:
+            # Unknown service - show available providers
             console.print(f"❌ Unknown service: {service}", style="red")
-            console.print("Supported services: anthropic, google, microsoft")
+            console.print("\nAvailable services:")
+            self._show_connection_status()
 
     def _show_connection_status(self):
-        """Show status of all service connections."""
-        console.print(Panel.fit(
-            "[bold]Connected Services[/bold]\n\n"
-            "Checking connection status...",
-            title="Integrations",
-            border_style="cyan"
-        ))
-
-        # Check Anthropic API key
+        """Show status of all service connections from backend API."""
         try:
-            anthropic_status = self.api_client.get_anthropic_status()
-            if anthropic_status.get('has_key'):
-                console.print("✅ Anthropic: API key configured", style="green")
-            else:
-                console.print("❌ Anthropic: API key not configured", style="red")
-        except Exception:
-            console.print("❌ Anthropic: API key not configured", style="red")
+            # Get all connections from backend API
+            status_data = self.api_client.get_connections_status(include_unavailable=True)
+            connections = status_data.get('connections', [])
 
-        # Check Google
-        try:
-            google_status = self.api_client.get_google_status()
-            if google_status.get('has_credentials'):
-                email = google_status.get('email', 'Unknown')
-                if google_status.get('expired'):
-                    console.print(f"⚠️  Google: Connected as {email} (token expired - reconnect needed)", style="yellow")
-                else:
-                    console.print(f"✅ Google: Connected as {email}", style="green")
-            else:
-                console.print("○  Google: Not connected", style="dim")
-        except Exception:
-            console.print("○  Google: Not connected", style="dim")
+            # Group by status
+            connected = [c for c in connections if c.get('status') == 'connected']
+            disconnected = [c for c in connections if c.get('is_available') and c.get('status') == 'disconnected']
+            coming_soon = [c for c in connections if not c.get('is_available')]
 
-        # Check Microsoft (placeholder - no API method yet)
-        console.print("❌ Microsoft: Not connected", style="dim")
+            # Build output
+            lines = []
+            lines.append("[bold]Your Connections[/bold]")
+            lines.append("")
+            lines.append("Use /connect {provider} to connect")
+            lines.append("")
 
-        console.print("\n[bold]Commands:[/bold]")
-        console.print("  /connect anthropic   Set your Anthropic API key (required)")
-        console.print("  /connect google      Connect Google (Gmail, Calendar)")
-        console.print("  /connect microsoft   Connect Microsoft (Outlook, Calendar)")
-        console.print("  /connect --reset     Disconnect all services")
+            # Connected
+            if connected:
+                lines.append("[green]✅ Connected:[/green]")
+                for i, conn in enumerate(connected, 1):
+                    line = f"{i}. {conn['display_name']}"
+                    if conn.get('connected_email'):
+                        line += f" - {conn['connected_email']}"
+                    lines.append(line)
+                lines.append("")
+
+            # Available but not connected
+            if disconnected:
+                lines.append("[yellow]❌ Available (Not Connected):[/yellow]")
+                for i, conn in enumerate(disconnected, len(connected) + 1):
+                    lines.append(f"{i}. {conn['display_name']}  [dim]\\[{conn['provider_key']}][/dim]")
+                lines.append("")
+
+            # Coming soon
+            if coming_soon:
+                lines.append("[dim]⏳ Coming Soon:[/dim]")
+                for i, conn in enumerate(coming_soon, len(connected) + len(disconnected) + 1):
+                    lines.append(f"{i}. {conn['display_name']}  [dim]\\[{conn['provider_key']}][/dim]")
+                lines.append("")
+
+            console.print(Panel("\n".join(lines), title="Integrations", border_style="cyan"))
+
+        except Exception as e:
+            console.print(f"❌ Error fetching connections: {e}", style="red")
+            console.print("Run /connect {provider} to manage connections")
 
     def _connect_google(self):
         """Connect Google account via OAuth with local callback."""
@@ -621,6 +736,70 @@ class ZylchCLI:
                 console.print(f"\n❌ Failed to save API key: {result.get('error', 'Unknown error')}", style="red")
         except Exception as e:
             console.print(f"\n❌ Error saving API key: {e}", style="red")
+
+    def _connect_api_key_service(self, service: str):
+        """Connect an API key-based service (Vonage, Pipedrive, etc.).
+
+        Args:
+            service: Service name (vonage, pipedrive, etc.)
+        """
+        from rich.prompt import Prompt
+
+        service_info = {
+            'vonage': {
+                'display_name': 'Vonage SMS',
+                'description': 'Send SMS messages via Vonage',
+                'url': 'https://dashboard.nexmo.com/',
+                'fields': [
+                    {'name': 'api_key', 'label': 'API Key', 'placeholder': 'Your Vonage API Key'},
+                    {'name': 'api_secret', 'label': 'API Secret', 'placeholder': 'Your Vonage API Secret'},
+                    {'name': 'from_number', 'label': 'From Number', 'placeholder': 'e.g., ZylchAI or +1234567890'}
+                ]
+            },
+            'pipedrive': {
+                'display_name': 'Pipedrive CRM',
+                'description': 'Sync contacts and deals with Pipedrive',
+                'url': 'https://app.pipedrive.com/settings/api',
+                'fields': [
+                    {'name': 'api_token', 'label': 'API Token', 'placeholder': 'Your Pipedrive API Token'}
+                ]
+            }
+        }
+
+        info = service_info.get(service)
+        if not info:
+            console.print(f"❌ Configuration not available for {service}", style="red")
+            return
+
+        console.print(Panel.fit(
+            f"[bold]Connect {info['display_name']}[/bold]\n\n"
+            f"{info['description']}\n\n"
+            f"Get your credentials at: {info['url']}",
+            title=info['display_name'],
+            border_style="cyan"
+        ))
+
+        # Collect credentials
+        credentials = {}
+        for field in info['fields']:
+            value = Prompt.ask(f"\n{field['label']}", password=(field['name'] in ['api_secret', 'api_token']))
+            if not value:
+                console.print("❌ Setup cancelled.", style="yellow")
+                return
+            credentials[field['name']] = value.strip()
+
+        # Save to server
+        try:
+            result = self.api_client.save_provider_credentials(service, credentials)
+            if result.get('success'):
+                console.print(f"\n✅ {info['display_name']} connected successfully!", style="green")
+                if service == 'vonage':
+                    console.print("You can now send SMS messages via the agent.")
+                    console.print("Try: \"Send an SMS to +1234567890 saying hello\"")
+            else:
+                console.print(f"\n⚠️  {result.get('message', 'Unknown error')}", style="yellow")
+        except Exception as e:
+            console.print(f"\n❌ Error saving credentials: {e}", style="red")
 
     def _connect_service(self, service: str):
         """Connect a service (Google/Microsoft) via OAuth with local callback.
@@ -745,9 +924,10 @@ class ZylchCLI:
 
 
 @click.command()
-@click.option('--server-url', help='Override server URL')
+@click.option('--host', default=None, help='Server host (default: from config)')
+@click.option('--port', default=None, type=int, help='Server port (default: from config)')
 @click.option('--log', type=click.Choice(['debug', 'info', 'warning', 'error']), default='warning', help='Log level')
-def main(server_url, log):
+def main(host, port, log):
     """Zylch - Your AI assistant for email and calendar."""
     # Setup logging based on --log flag
     log_levels = {
@@ -764,8 +944,18 @@ def main(server_url, log):
     # Initialize CLI
     cli = ZylchCLI()
 
-    # Override server URL if provided
-    if server_url:
+    # Override server URL if host/port provided
+    if host or port:
+        # Parse existing URL to get defaults
+        from urllib.parse import urlparse
+        parsed = urlparse(cli.config.api_server_url)
+
+        new_host = host or parsed.hostname or 'localhost'
+        new_port = port or parsed.port or 9000
+        new_scheme = 'https' if new_host not in ['localhost', '127.0.0.1'] else 'http'
+
+        # Build new URL
+        server_url = f"{new_scheme}://{new_host}:{new_port}"
         cli.config.api_server_url = server_url
         cli.api_client.server_url = server_url
 

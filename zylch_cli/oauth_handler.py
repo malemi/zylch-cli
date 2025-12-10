@@ -28,6 +28,7 @@ class OAuthCallbackHandler(BaseHTTPRequestHandler):
         if parsed_url.path == '/callback':
             # Extract token from query params
             token = query_params.get('token', [None])[0]
+            refresh_token = query_params.get('refresh_token', [None])[0]
             owner_id = query_params.get('owner_id', [None])[0]
             email = query_params.get('email', [None])[0]
             error = query_params.get('error', [None])[0]
@@ -57,9 +58,10 @@ class OAuthCallbackHandler(BaseHTTPRequestHandler):
                 """
                 self.wfile.write(html.encode())
             elif token:
-                # Success - store token
+                # Success - store token and refresh_token
                 OAuthCallbackHandler.received_data = {
                     'token': token,
+                    'refresh_token': refresh_token,
                     'owner_id': owner_id,
                     'email': email
                 }

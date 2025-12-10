@@ -71,7 +71,7 @@ class CLIConfig(BaseModel):
 
     # API Server
     api_server_url: str = Field(
-        default="http://localhost:9000",
+        default="https://api.zylchai.com",
         description="Zylch API server URL"
     )
 
@@ -79,6 +79,10 @@ class CLIConfig(BaseModel):
     session_token: str = Field(
         default="",
         description="Current session token (JWT or Firebase)"
+    )
+    refresh_token: str = Field(
+        default="",
+        description="Firebase refresh token for auto-renewal"
     )
     owner_id: str = Field(
         default="",
@@ -140,3 +144,73 @@ def save_config(config: CLIConfig):
 
     with open(config_path, 'w') as f:
         json.dump(config.model_dump(), f, indent=2)
+
+
+# Firebase API key (public, safe to embed - same as used in login page)
+FIREBASE_API_KEY = "AIzaSyCXqBvJdNgzTtR9r_aS_j9rkPCGcXb-gaY"
+
+# Refresh threshold: refresh token when less than 5 minutes remain
+REFRESH_THRESHOLD_SECONDS = 5 * 60
+
+
+def needs_token_refresh(token: str) -> bool:
+    """Check if token needs to be refreshed.
+
+    Args:
+        token: JWT token string
+
+    Returns:
+        True if token expires within REFRESH_THRESHOLD_SECONDS or is already expired
+    """
+    if not token:
+        return False
+
+    is_valid, seconds_remaining = check_token_status(token)
+
+    if not is_valid:
+        return True  # Already expired
+
+    if seconds_remaining is None:
+        return False  # Can't determine, let server handle it
+
+    return seconds_remaining < REFRESH_THRESHOLD_SECONDS
+
+
+def refresh_firebase_token(refresh_token: str) -> Optional[Tuple[str, str]]:
+    """Refresh Firebase ID token using refresh token.
+
+    Args:
+        refresh_token: Firebase refresh token
+
+    Returns:
+        Tuple of (new_id_token, new_refresh_token) or None if refresh fails
+    """
+    import requests
+
+    if not refresh_token:
+        return None
+
+    try:
+        response = requests.post(
+            f"https://securetoken.googleapis.com/v1/token?key={FIREBASE_API_KEY}",
+            json={
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token
+            },
+            timeout=30
+        )
+
+        if response.status_code != 200:
+            return None
+
+        data = response.json()
+        new_id_token = data.get('id_token')
+        new_refresh_token = data.get('refresh_token', refresh_token)
+
+        if new_id_token:
+            return new_id_token, new_refresh_token
+
+        return None
+
+    except Exception:
+        return None
