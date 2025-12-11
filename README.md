@@ -26,18 +26,14 @@ The CLI is a **thin client** that communicates with the Zylch API server. All bu
 ## Installation
 
 ```bash
-# Clone the repository
-git clone https://github.com/zylch/zylch-cli.git
+pip install zylch-cli
+```
+
+### From source
+
+```bash
+git clone https://github.com/malemi/zylch-cli.git
 cd zylch-cli
-
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install with Poetry
-poetry install
-
-# Or install dependencies directly
 pip install -e .
 ```
 
@@ -219,15 +215,18 @@ zylch-cli/
 ## Development
 
 ```bash
-# Run with Poetry
-poetry run zylch
+# Install with dev dependencies
+pip install -e ".[dev]"
+
+# Run CLI
+zylch
 
 # Run tests
-poetry run pytest
+pytest
 
 # Format code
-poetry run black zylch_cli/
-poetry run ruff check zylch_cli/
+black zylch_cli/
+ruff check zylch_cli/
 ```
 
 ## Production URLs

@@ -4,4 +4,4 @@ This is a thin client that connects to the Zylch API server.
 It does NOT work standalone - requires a running server.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.9.0"

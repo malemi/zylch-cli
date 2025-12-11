@@ -28,6 +28,16 @@ from .oauth_handler import initiate_browser_login, initiate_service_connect
 logger = logging.getLogger(__name__)
 console = Console()
 
+# Profile path
+PROFILE_PATH = Path.home() / ".zylch" / "profile"
+DEFAULT_PROFILE = """# Zylch CLI Profile
+# Commands here run at startup (after login)
+# Lines starting with # are comments
+
+# Show connection status at startup
+/connect
+"""
+
 
 class ZylchCLI:
     """Zylch thin CLI client."""
@@ -172,7 +182,9 @@ class ZylchCLI:
                 self.api_client.set_token(token)
 
                 console.print(f"\n✅ Logged in as {self.config.email}", style="green")
-                console.print(f"Owner ID: {self.config.owner_id}")
+
+                # Run profile commands after successful login
+                self._run_profile()
             else:
                 console.print("❌ Login failed - no token received", style="red")
 
@@ -482,63 +494,107 @@ class ZylchCLI:
             console.print(f"\n❌ Chat error: {e}", style="red")
             logger.exception("Chat failed")
 
+    def _ensure_profile_exists(self):
+        """Ensure ~/.zylch/profile exists with default content."""
+        if not PROFILE_PATH.exists():
+            PROFILE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            PROFILE_PATH.write_text(DEFAULT_PROFILE)
+            logger.info(f"Created default profile at {PROFILE_PATH}")
+
+    def _run_profile(self):
+        """Run commands from ~/.zylch/profile.
+
+        Executes each command, shows output, continues on error (like bashrc).
+        """
+        self._ensure_profile_exists()
+
+        try:
+            profile_content = PROFILE_PATH.read_text()
+        except Exception as e:
+            logger.warning(f"Could not read profile: {e}")
+            return
+
+        console.print("\n[dim]Running profile...[/dim]")
+
+        for line in profile_content.splitlines():
+            line = line.strip()
+
+            # Skip empty lines and comments
+            if not line or line.startswith('#'):
+                continue
+
+            # Execute the command
+            logger.debug(f"Profile: executing '{line}'")
+            try:
+                self._execute_profile_command(line)
+            except Exception as e:
+                # Continue on error (like bashrc)
+                console.print(f"[yellow]Profile error on '{line}': {e}[/yellow]")
+                logger.warning(f"Profile command '{line}' failed: {e}")
+
+    def _execute_profile_command(self, cmd: str):
+        """Execute a single profile command.
+
+        Args:
+            cmd: Command to execute (e.g., '/connect')
+        """
+        cmd_lower = cmd.lower()
+
+        # Handle client-side commands
+        if cmd_lower == '/connect':
+            self.connect()
+        elif cmd_lower == '/status':
+            self.status()
+        elif cmd_lower.startswith('/connect '):
+            service = cmd.split(' ', 1)[1].strip()
+            self.connect(service=service)
+        elif cmd_lower == '/sync':
+            self.sync()
+        elif cmd_lower.startswith('/'):
+            # Server-side command - send to API
+            if not self.config.session_token:
+                console.print(f"[dim]Skipping {cmd} (not logged in)[/dim]")
+                return
+
+            try:
+                response = self.api_client.send_chat_message(message=cmd, session_id=None)
+                assistant_response = response.get('response', '')
+                if assistant_response:
+                    console.print(f"[green]Zylch[/green]: {assistant_response}")
+            except Exception as e:
+                console.print(f"[yellow]Error running {cmd}: {e}[/yellow]")
+        else:
+            # Non-command text - send to AI as chat message
+            if not self.config.session_token:
+                console.print(f"[dim]Skipping '{cmd}' (not logged in)[/dim]")
+                return
+
+            try:
+                console.print(f"\n[dim]→ {cmd}[/dim]")
+                response = self.api_client.send_chat_message(message=cmd, session_id=None)
+                assistant_response = response.get('response', '')
+                if assistant_response:
+                    console.print(f"[green]Zylch[/green]: {assistant_response}")
+            except Exception as e:
+                console.print(f"[yellow]Error: {e}[/yellow]")
+
     def _show_startup_status(self):
-        """Show connection status at chat startup."""
-        console.print("\n[bold]Status:[/bold]")
-
-        # Check login status
+        """Show connection status at chat startup (legacy - now uses profile)."""
+        # Check login status first
         if not self.config.session_token:
+            console.print("\n[bold]Status:[/bold]")
             console.print("  ❌ Not logged in → /login", style="red")
-            return  # No point checking other services if not logged in
+            return
 
-        # Check token expiry locally first (faster than API call)
-        is_valid, seconds_remaining = check_token_status(self.config.session_token)
-
+        # Check token expiry
+        is_valid, _ = check_token_status(self.config.session_token)
         if not is_valid:
-            # Token is expired
+            console.print("\n[bold]Status:[/bold]")
             console.print("  ⚠️  Session expired → /login", style="yellow")
             return
 
-        # Token not expired, show user info
-        user_email = self.config.email
-        if user_email:
-            console.print(f"  ✅ Logged in as {user_email}", style="green")
-        else:
-            console.print("  ✅ Logged in", style="green")
-
-        # Check Anthropic API key
-        try:
-            anthropic_status = self.api_client.get_anthropic_status()
-            if anthropic_status.get('has_key'):
-                console.print("  ✅ Anthropic API key configured", style="green")
-            else:
-                console.print("  ❌ Anthropic API key not configured → /connect anthropic", style="red")
-        except Exception:
-            console.print("  ❌ Anthropic API key not configured → /connect anthropic", style="red")
-
-        # Check Google connection
-        try:
-            google_status = self.api_client.get_google_status()
-            if google_status.get('has_credentials'):
-                email = google_status.get('email', '')
-                if google_status.get('expired'):
-                    console.print(f"  ⚠️  Google token expired → /connect google", style="yellow")
-                else:
-                    # Show what permissions we have
-                    console.print(f"  ✅ Google: Email (read/send), Calendar (read/write)", style="green")
-            else:
-                console.print("  ○  Google not connected → /connect google", style="dim")
-        except Exception:
-            console.print("  ○  Google not connected → /connect google", style="dim")
-
-        # TODO: Add Microsoft check when implemented
-        # try:
-        #     microsoft_status = self.api_client.get_microsoft_status()
-        #     ...
-        # except Exception:
-        #     pass
-
-        console.print("")  # Empty line after status
+        # Run profile commands (replaces old hardcoded status checks)
+        self._run_profile()
 
     def _show_help(self):
         """Show help for chat commands."""
