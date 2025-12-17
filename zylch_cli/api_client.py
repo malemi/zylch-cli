@@ -543,5 +543,5 @@ class ZylchAPIClient:
         """
         return self._request(
             "DELETE",
-            f"/api/connections/provider/{provider_key}"
+            f"/api/connections/provider/{provider_key}/credentials"
         )

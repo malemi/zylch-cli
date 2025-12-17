@@ -399,10 +399,10 @@ class ZylchCLI:
                 if not user_input.strip():
                     continue
 
-                # Handle special commands (client-side only)
+                # Handle special commands (client-side only - auth & session mgmt)
                 cmd = user_input.strip().lower()
 
-                # Commands that MUST be handled client-side (auth, session management)
+                # Commands that MUST be handled client-side
                 if cmd in ['/quit', '/exit', '/q']:
                     console.print("\n👋 Goodbye!", style="yellow")
                     break
@@ -412,36 +412,24 @@ class ZylchCLI:
                 elif cmd == '/logout':
                     self.logout()
                     continue
-                elif cmd == '/status':
-                    self.status()
-                    continue
                 elif cmd == '/new':
                     session_id = None
                     console.print("\n✨ Started new conversation", style="green")
                     continue
-                elif cmd == '/connect':
-                    self.connect()
-                    continue
-                elif cmd == '/connect anthropic':
-                    self.connect(service='anthropic')
-                    continue
-                elif cmd == '/connect google':
-                    self.connect(service='google')
-                    continue
-                elif cmd == '/connect microsoft':
-                    self.connect(service='microsoft')
-                    continue
-                elif cmd == '/connect --reset':
-                    self.connect(reset=True)
-                    continue
-                elif cmd.startswith('/connect '):
-                    # Handle "/connect <service>"
-                    service = cmd.split(' ', 1)[1].strip()
-                    self.connect(service=service)
+                elif cmd == '/connect' or cmd.startswith('/connect '):
+                    # OAuth requires local browser - must stay client-side
+                    if cmd == '/connect':
+                        self.connect()
+                    elif cmd == '/connect --reset':
+                        self.connect(reset=True)
+                    else:
+                        service = cmd.split(' ', 1)[1].strip()
+                        self.connect(service=service)
                     continue
 
-                # All other /commands go to server (including /help, /sync, /gaps, /archive, etc.)
-                # The server's command_handlers.py handles them
+                # All other commands & messages go to backend
+                # Backend handles: /sync, /help, /gaps, /status, /archive, /memory, etc.
+                # Backend also handles semantic matching (e.g., "sync my emails" -> /sync)
 
                 # Check auth before sending message
                 if not self.config.session_token:
@@ -538,45 +526,30 @@ class ZylchCLI:
         Args:
             cmd: Command to execute (e.g., '/connect')
         """
-        cmd_lower = cmd.lower()
+        if not self.config.session_token:
+            console.print(f"[dim]Skipping '{cmd}' (not logged in)[/dim]")
+            return
 
-        # Handle client-side commands
-        if cmd_lower == '/connect':
-            self.connect()
-        elif cmd_lower == '/status':
-            self.status()
-        elif cmd_lower.startswith('/connect '):
-            service = cmd.split(' ', 1)[1].strip()
-            self.connect(service=service)
-        elif cmd_lower == '/sync':
-            self.sync()
-        elif cmd_lower.startswith('/'):
-            # Server-side command - send to API
-            if not self.config.session_token:
-                console.print(f"[dim]Skipping {cmd} (not logged in)[/dim]")
-                return
+        # Handle commands that require local execution (OAuth, etc.)
+        cmd_lower = cmd.strip().lower()
+        if cmd_lower == '/connect' or cmd_lower.startswith('/connect '):
+            if cmd_lower == '/connect':
+                self.connect()
+            elif cmd_lower == '/connect --reset':
+                self.connect(reset=True)
+            else:
+                service = cmd.split(' ', 1)[1].strip()
+                self.connect(service=service)
+            return
 
-            try:
-                response = self.api_client.send_chat_message(message=cmd, session_id=None)
-                assistant_response = response.get('response', '')
-                if assistant_response:
-                    console.print(f"[green]Zylch[/green]: {assistant_response}")
-            except Exception as e:
-                console.print(f"[yellow]Error running {cmd}: {e}[/yellow]")
-        else:
-            # Non-command text - send to AI as chat message
-            if not self.config.session_token:
-                console.print(f"[dim]Skipping '{cmd}' (not logged in)[/dim]")
-                return
-
-            try:
-                console.print(f"\n[dim]→ {cmd}[/dim]")
-                response = self.api_client.send_chat_message(message=cmd, session_id=None)
-                assistant_response = response.get('response', '')
-                if assistant_response:
-                    console.print(f"[green]Zylch[/green]: {assistant_response}")
-            except Exception as e:
-                console.print(f"[yellow]Error: {e}[/yellow]")
+        # All other commands go to backend
+        try:
+            response = self.api_client.send_chat_message(message=cmd, session_id=None)
+            assistant_response = response.get('response', '')
+            if assistant_response:
+                console.print(f"[green]Zylch[/green]: {assistant_response}")
+        except Exception as e:
+            console.print(f"[yellow]Error: {e}[/yellow]")
 
     def _show_startup_status(self):
         """Show connection status at chat startup (legacy - now uses profile)."""
@@ -662,6 +635,8 @@ class ZylchCLI:
             self._connect_microsoft()
         elif service_lower == 'anthropic':
             self._connect_anthropic()
+        elif service_lower == 'mrcall':
+            self._connect_mrcall()
         elif service_lower in ['vonage', 'pipedrive']:
             self._connect_api_key_service(service_lower)
         else:
@@ -726,6 +701,10 @@ class ZylchCLI:
     def _connect_microsoft(self):
         """Connect Microsoft account via OAuth with local callback."""
         self._connect_service('microsoft')
+
+    def _connect_mrcall(self):
+        """Connect MrCall account via OAuth with local callback."""
+        self._connect_service('mrcall')
 
     def _connect_anthropic(self):
         """Set Anthropic API key for AI chat."""
@@ -799,7 +778,8 @@ class ZylchCLI:
         Args:
             service: Service name (vonage, pipedrive, etc.)
         """
-        from rich.prompt import Prompt
+        import os
+        from rich.prompt import Prompt, Confirm
 
         service_info = {
             'vonage': {
@@ -807,9 +787,9 @@ class ZylchCLI:
                 'description': 'Send SMS messages via Vonage',
                 'url': 'https://dashboard.nexmo.com/',
                 'fields': [
-                    {'name': 'api_key', 'label': 'API Key', 'placeholder': 'Your Vonage API Key'},
-                    {'name': 'api_secret', 'label': 'API Secret', 'placeholder': 'Your Vonage API Secret'},
-                    {'name': 'from_number', 'label': 'From Number', 'placeholder': 'e.g., ZylchAI or +1234567890'}
+                    {'name': 'api_key', 'label': 'API Key', 'env_var': 'VONAGE_API_KEY'},
+                    {'name': 'api_secret', 'label': 'API Secret', 'env_var': 'VONAGE_API_SECRET'},
+                    {'name': 'from_number', 'label': 'From Number', 'env_var': 'VONAGE_FROM_NUMBER'}
                 ]
             },
             'pipedrive': {
@@ -817,7 +797,7 @@ class ZylchCLI:
                 'description': 'Sync contacts and deals with Pipedrive',
                 'url': 'https://app.pipedrive.com/settings/api',
                 'fields': [
-                    {'name': 'api_token', 'label': 'API Token', 'placeholder': 'Your Pipedrive API Token'}
+                    {'name': 'api_token', 'label': 'API Token', 'env_var': 'PIPEDRIVE_API_TOKEN'}
                 ]
             }
         }
@@ -827,22 +807,54 @@ class ZylchCLI:
             console.print(f"❌ Configuration not available for {service}", style="red")
             return
 
+        # Build env var hint
+        env_vars = [f.get('env_var') for f in info['fields'] if f.get('env_var')]
+        env_hint = f"\n\n[dim]Tip: Set {', '.join(env_vars)} to auto-detect[/dim]" if env_vars else ""
+
         console.print(Panel.fit(
             f"[bold]Connect {info['display_name']}[/bold]\n\n"
             f"{info['description']}\n\n"
-            f"Get your credentials at: {info['url']}",
+            f"Get your credentials at: {info['url']}"
+            f"{env_hint}",
             title=info['display_name'],
             border_style="cyan"
         ))
 
-        # Collect credentials
-        credentials = {}
+        # Check for environment variables
+        env_credentials = {}
         for field in info['fields']:
-            value = Prompt.ask(f"\n{field['label']}", password=(field['name'] in ['api_secret', 'api_token']))
-            if not value:
-                console.print("❌ Setup cancelled.", style="yellow")
-                return
-            credentials[field['name']] = value.strip()
+            env_var = field.get('env_var')
+            if env_var:
+                value = os.environ.get(env_var)
+                if value:
+                    env_credentials[field['name']] = value.strip()
+
+        # Show found env vars and ask to use them
+        credentials = {}
+        if env_credentials:
+            console.print(f"\n Found {len(env_credentials)} environment variable(s):", style="cyan")
+            for field in info['fields']:
+                env_var = field.get('env_var')
+                value = env_credentials.get(field['name'])
+                if value:
+                    # Mask sensitive values
+                    if field['name'] in ['api_secret', 'api_token', 'api_key']:
+                        masked = value[:4] + '...' + value[-4:] if len(value) > 8 else '***'
+                    else:
+                        masked = value
+                    console.print(f"  {env_var}: {masked}", style="dim")
+
+            if Confirm.ask("\nUse these values?"):
+                credentials = env_credentials.copy()
+
+        # Prompt for any missing credentials
+        for field in info['fields']:
+            if field['name'] not in credentials:
+                value = Prompt.ask(f"\n{field['label']}", password=(field['name'] in ['api_secret', 'api_token']))
+                if not value:
+                    console.print("❌ Setup cancelled.", style="yellow")
+                    return
+                credentials[field['name']] = value.strip()
 
         # Save to server
         try:
@@ -913,12 +925,7 @@ class ZylchCLI:
     def _disconnect_all_services(self):
         """Disconnect all service integrations."""
         console.print(Panel.fit(
-            "[bold]Disconnect All Services[/bold]\n\n"
-            "This will revoke access to:\n"
-            "• Anthropic API key\n"
-            "• Google (Gmail, Calendar)\n"
-            "• Microsoft (when available)\n\n"
-            "You will need to re-configure to use Zylch again.",
+            "[bold]Disconnect All Services[/bold]",
             title="Disconnect",
             border_style="yellow"
         ))
@@ -928,29 +935,37 @@ class ZylchCLI:
             console.print("Cancelled.", style="dim")
             return
 
-        # Disconnect Anthropic
+        # Get all connections dynamically
         try:
-            status = self.api_client.get_anthropic_status()
-            if status.get('has_key'):
-                self.api_client.revoke_anthropic()
-                console.print("✅ Anthropic API key deleted", style="green")
-            else:
-                console.print("ℹ️  Anthropic was not configured", style="dim")
+            status_data = self.api_client.get_connections_status(include_unavailable=False)
+            connections = status_data.get('connections', [])
         except Exception as e:
-            console.print(f"⚠️  Error deleting Anthropic key: {e}", style="yellow")
+            console.print(f"❌ Error fetching connections: {e}", style="red")
+            return
 
-        # Disconnect Google
-        try:
-            status = self.api_client.get_google_status()
-            if status.get('has_credentials'):
-                self.api_client.revoke_google()
-                console.print("✅ Google disconnected", style="green")
-            else:
-                console.print("ℹ️  Google was not connected", style="dim")
-        except Exception as e:
-            console.print(f"⚠️  Error disconnecting Google: {e}", style="yellow")
+        # Find connected services
+        connected = [c for c in connections if c.get('status') == 'connected']
 
-        console.print("\n✅ All services disconnected.", style="green")
+        if not connected:
+            console.print("ℹ️  No services are currently connected", style="dim")
+            return
+
+        # Disconnect each connected service
+        disconnected_count = 0
+        for conn in connected:
+            provider_key = conn.get('provider_key')
+            display_name = conn.get('display_name', provider_key)
+            try:
+                self.api_client.disconnect_provider(provider_key)
+                console.print(f"✅ {display_name} disconnected", style="green")
+                disconnected_count += 1
+            except Exception as e:
+                console.print(f"⚠️  Error disconnecting {display_name}: {e}", style="yellow")
+
+        if disconnected_count > 0:
+            console.print(f"\n✅ {disconnected_count} service(s) disconnected.", style="green")
+        else:
+            console.print("\n⚠️  No services were disconnected.", style="yellow")
 
     def _show_history(self, session_id: Optional[str] = None):
         """Show chat history."""

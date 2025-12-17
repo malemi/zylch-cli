@@ -17,6 +17,10 @@ class OAuthCallbackHandler(BaseHTTPRequestHandler):
     # Class variable to store the received token
     received_data: Optional[Dict[str, Any]] = None
     shutdown_event: Event = Event()
+    # Class variables for code exchange (set by initiate_service_connect)
+    backend_url: Optional[str] = None
+    auth_token: Optional[str] = None
+    service: Optional[str] = None
 
     def do_GET(self):
         """Handle GET request from OAuth callback."""
@@ -26,12 +30,16 @@ class OAuthCallbackHandler(BaseHTTPRequestHandler):
 
         # Check if this is the callback with token
         if parsed_url.path == '/callback':
-            # Extract token from query params
+            # Extract token from query params (direct token flow - Google/Microsoft via Zylch backend)
             token = query_params.get('token', [None])[0]
             refresh_token = query_params.get('refresh_token', [None])[0]
             owner_id = query_params.get('owner_id', [None])[0]
             email = query_params.get('email', [None])[0]
             error = query_params.get('error', [None])[0]
+
+            # Also check for authorization code flow (MrCall/StarChat)
+            code = query_params.get('code', [None])[0]
+            state = query_params.get('state', [None])[0]
 
             if error:
                 # OAuth error
@@ -57,6 +65,9 @@ class OAuthCallbackHandler(BaseHTTPRequestHandler):
                 </html>
                 """
                 self.wfile.write(html.encode())
+            elif code and state:
+                # Authorization code flow (MrCall/StarChat) - exchange code for tokens
+                self._handle_code_exchange(code, state)
             elif token:
                 # Success - store token and refresh_token
                 OAuthCallbackHandler.received_data = {
@@ -200,6 +211,152 @@ class OAuthCallbackHandler(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
 
+    def _handle_code_exchange(self, code: str, state: str):
+        """Handle authorization code exchange for OAuth flows like MrCall.
+
+        Calls the Zylch backend to exchange the authorization code for tokens.
+        """
+        import requests
+
+        # Check if we have the backend info needed for code exchange
+        if not OAuthCallbackHandler.backend_url or not OAuthCallbackHandler.auth_token:
+            # No backend info - just store code and state for manual handling
+            OAuthCallbackHandler.received_data = {
+                'code': code,
+                'state': state,
+                'needs_exchange': True
+            }
+            self._send_success_response("Authorization Code Received",
+                "Code received. Exchanging for tokens...")
+            return
+
+        # Call the Zylch backend callback endpoint to exchange code for tokens
+        service = OAuthCallbackHandler.service or 'mrcall'
+        callback_url = f"{OAuthCallbackHandler.backend_url}/api/auth/{service}/callback"
+
+        try:
+            headers = {'Authorization': f'Bearer {OAuthCallbackHandler.auth_token}'}
+            params = {'code': code, 'state': state}
+            response = requests.get(callback_url, headers=headers, params=params, timeout=30)
+
+            if response.status_code == 200:
+                # Success - tokens exchanged and stored on backend
+                OAuthCallbackHandler.received_data = {
+                    'success': True,
+                    'service': service,
+                    'message': f'{service.capitalize()} connected successfully'
+                }
+                self._send_success_response(f"{service.capitalize()} Connected!",
+                    f"Successfully connected {service.capitalize()}.<br>Return to your terminal.")
+            else:
+                # Backend returned an error
+                error_detail = response.text
+                try:
+                    error_json = response.json()
+                    error_detail = error_json.get('detail', error_detail)
+                except:
+                    pass
+                OAuthCallbackHandler.received_data = {
+                    'error': f'Token exchange failed: {error_detail}'
+                }
+                self._send_error_response(f"Connection Failed",
+                    f"Failed to connect {service.capitalize()}: {error_detail}")
+        except requests.RequestException as e:
+            OAuthCallbackHandler.received_data = {
+                'error': f'Failed to contact server: {str(e)}'
+            }
+            self._send_error_response("Connection Error",
+                f"Failed to contact Zylch server: {str(e)}")
+
+    def _send_success_response(self, title: str, message: str):
+        """Send a success HTML response."""
+        self.send_response(200)
+        self.send_header('Content-type', 'text/html; charset=utf-8')
+        self.end_headers()
+        html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>{title} - Zylch CLI</title>
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            background: linear-gradient(to bottom, #ffffff, #f9fafb);
+            padding: 20px;
+        }}
+        .container {{ text-align: center; max-width: 400px; }}
+        .logo {{ font-size: 48px; font-weight: 300; color: #1a1a1a; margin-bottom: 32px; letter-spacing: -2px; }}
+        .logo span {{ font-weight: 600; }}
+        .check-icon {{
+            width: 64px; height: 64px; background: #22c55e; border-radius: 50%;
+            display: flex; align-items: center; justify-content: center; margin: 0 auto 24px;
+        }}
+        .check-icon svg {{ width: 32px; height: 32px; stroke: white; stroke-width: 3; fill: none; }}
+        h1 {{ font-size: 24px; font-weight: 600; color: #1a1a1a; margin-bottom: 12px; }}
+        .message {{ color: #6b7280; font-size: 16px; line-height: 1.5; margin-bottom: 24px; }}
+        .countdown-box {{ background: #f3f4f6; border-radius: 12px; padding: 16px 24px; margin-bottom: 16px; }}
+        .countdown {{ font-size: 32px; font-weight: 700; color: #4a9eff; }}
+        .countdown-label {{ font-size: 14px; color: #9ca3af; margin-top: 4px; }}
+        .hint {{ font-size: 14px; color: #9ca3af; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="logo"><span>Z</span>ylch</div>
+        <div class="check-icon">
+            <svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"></polyline></svg>
+        </div>
+        <h1>{title}</h1>
+        <p class="message">{message}</p>
+        <div class="countdown-box">
+            <div class="countdown" id="countdown">5</div>
+            <div class="countdown-label">seconds until this window closes</div>
+        </div>
+        <p class="hint">Or close this tab manually.</p>
+    </div>
+    <script>
+        let seconds = 5;
+        const countdownEl = document.getElementById('countdown');
+        const interval = setInterval(() => {{
+            seconds--;
+            countdownEl.textContent = seconds;
+            if (seconds <= 0) {{ clearInterval(interval); window.close(); }}
+        }}, 1000);
+    </script>
+</body>
+</html>"""
+        self.wfile.write(html.encode('utf-8'))
+
+    def _send_error_response(self, title: str, message: str):
+        """Send an error HTML response."""
+        self.send_response(400)
+        self.send_header('Content-type', 'text/html')
+        self.end_headers()
+        html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>{title} - Zylch</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; text-align: center; padding: 50px; }}
+                .error {{ color: #d32f2f; }}
+            </style>
+        </head>
+        <body>
+            <h1 class="error">❌ {title}</h1>
+            <p>{message}</p>
+            <p>You can close this window and try again.</p>
+        </body>
+        </html>
+        """
+        self.wfile.write(html.encode())
+
     def log_message(self, format, *args):
         """Suppress logging to console."""
         pass
@@ -327,6 +484,8 @@ def initiate_service_connect(
         authorize_endpoint = f"{base_url}/api/auth/google/authorize"
     elif service_lower == 'microsoft':
         authorize_endpoint = f"{base_url}/api/auth/microsoft/authorize"
+    elif service_lower == 'mrcall':
+        authorize_endpoint = f"{base_url}/api/auth/mrcall/authorize"
     else:
         print(f"❌ Unknown service: {service}")
         return {'error': f'Unknown service: {service}'}
@@ -356,11 +515,16 @@ def initiate_service_connect(
         print(f"❌ Failed to connect to server: {e}")
         return {'error': str(e)}
 
+    # Set class variables for code exchange (used by MrCall OAuth flow)
+    OAuthCallbackHandler.backend_url = base_url
+    OAuthCallbackHandler.auth_token = auth_token
+    OAuthCallbackHandler.service = service_lower
+
     # Start local callback server
     callback_server = OAuthCallbackServer(port=callback_port)
     callback_server.start()
 
-    # Open browser with the auth URL from Google (not our API)
+    # Open browser with the auth URL
     print(f"\n🔐 Opening browser to connect {service_name}...")
     print(f"If browser doesn't open, visit:\n{auth_url}\n")
     webbrowser.open(auth_url)
