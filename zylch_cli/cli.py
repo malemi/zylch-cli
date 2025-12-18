@@ -19,7 +19,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Prompt
 
-from .config import load_config, save_config, CLIConfig, check_token_status, needs_token_refresh, refresh_firebase_token
+from .config import load_config, save_config, CLIConfig, check_token_status, needs_token_refresh, refresh_token_via_server
 from .api_client import ZylchAPIClient, ZylchAPIError, ZylchAuthError
 from .local_storage import LocalStorage
 from .modifier_queue import ModifierQueue
@@ -118,7 +118,7 @@ class ZylchCLI:
             return False
 
         logger.debug("Token expiring soon, attempting refresh...")
-        result = refresh_firebase_token(self.config.refresh_token)
+        result = refresh_token_via_server(self.config.api_server_url, self.config.refresh_token)
 
         if result:
             new_token, new_refresh_token = result

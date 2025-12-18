@@ -146,9 +146,6 @@ def save_config(config: CLIConfig):
         json.dump(config.model_dump(), f, indent=2)
 
 
-# Firebase API key (public, safe to embed - same as used in login page)
-FIREBASE_API_KEY = "AIzaSyCXqBvJdNgzTtR9r_aS_j9rkPCGcXb-gaY"
-
 # Refresh threshold: refresh token when less than 5 minutes remain
 REFRESH_THRESHOLD_SECONDS = 5 * 60
 
@@ -176,10 +173,11 @@ def needs_token_refresh(token: str) -> bool:
     return seconds_remaining < REFRESH_THRESHOLD_SECONDS
 
 
-def refresh_firebase_token(refresh_token: str) -> Optional[Tuple[str, str]]:
-    """Refresh Firebase ID token using refresh token.
+def refresh_token_via_server(server_url: str, refresh_token: str) -> Optional[Tuple[str, str]]:
+    """Refresh session token via Zylch API server.
 
     Args:
+        server_url: Zylch API server URL
         refresh_token: Firebase refresh token
 
     Returns:
@@ -192,11 +190,8 @@ def refresh_firebase_token(refresh_token: str) -> Optional[Tuple[str, str]]:
 
     try:
         response = requests.post(
-            f"https://securetoken.googleapis.com/v1/token?key={FIREBASE_API_KEY}",
-            json={
-                "grant_type": "refresh_token",
-                "refresh_token": refresh_token
-            },
+            f"{server_url.rstrip('/')}/api/auth/refresh",
+            json={"refresh_token": refresh_token},
             timeout=30
         )
 
@@ -204,7 +199,7 @@ def refresh_firebase_token(refresh_token: str) -> Optional[Tuple[str, str]]:
             return None
 
         data = response.json()
-        new_id_token = data.get('id_token')
+        new_id_token = data.get('token')
         new_refresh_token = data.get('refresh_token', refresh_token)
 
         if new_id_token:
