@@ -879,7 +879,7 @@ class ZylchCLI:
         console.print(Panel.fit(
             f"[bold]Connect {service_name} Account[/bold]\n\n"
             f"This will connect your {service_name} account to Zylch.\n"
-            f"You'll be able to sync {'Gmail and Calendar' if service == 'google' else 'Outlook and Calendar'}.\n\n"
+            f"You'll be able to sync {service}'s data.\n\n"
             "Your browser will open for authentication.",
             title=f"{service_name} OAuth",
             border_style="cyan"
@@ -915,9 +915,7 @@ class ZylchCLI:
             # Success
             email = result.get('email', 'Unknown')
             console.print(f"\n✅ {service_name} connected successfully!", style="green")
-            if email and email != 'Unknown':
-                console.print(f"Connected as: {email}")
-            console.print(f"\nYou can now sync your {'Gmail and Calendar' if service == 'google' else 'Outlook and Calendar'}.")
+            console.print(f"Connected with email address: {email}")
 
         except Exception as e:
             console.print(f"❌ Error connecting {service_name}: {e}", style="red")
@@ -1022,8 +1020,8 @@ def main(host, port, log):
         parsed = urlparse(cli.config.api_server_url)
 
         new_host = host or parsed.hostname or 'localhost'
-        new_port = port or parsed.port or 9000
-        new_scheme = 'https' if new_host not in ['localhost', '127.0.0.1'] else 'http'
+        new_port = port or parsed.port or 8000
+        new_scheme = 'http' if new_host in ['localhost', '127.0.0.1'] else 'https'
 
         # Build new URL
         server_url = f"{new_scheme}://{new_host}:{new_port}"
