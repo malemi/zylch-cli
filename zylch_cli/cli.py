@@ -418,14 +418,20 @@ class ZylchCLI:
                     continue
                 elif cmd == '/connect' or cmd.startswith('/connect '):
                     # OAuth requires local browser - must stay client-side
-                    if cmd == '/connect':
+                    # EXCEPT: --help, reset, status → go to backend
+                    parts = cmd.split()
+                    subcommand = parts[1] if len(parts) > 1 else None
+
+                    if subcommand in ('--help', 'reset', 'status'):
+                        pass  # Let it fall through to backend
+                    elif cmd == '/connect':
                         self.connect()
-                    elif cmd == '/connect --reset':
-                        self.connect(reset=True)
+                        continue
                     else:
-                        service = cmd.split(' ', 1)[1].strip()
+                        # /connect <provider> - OAuth flow
+                        service = parts[1]
                         self.connect(service=service)
-                    continue
+                        continue
 
                 # All other commands & messages go to backend
                 # Backend handles: /sync, /help, /gaps, /status, /archive, /memory, etc.
@@ -605,30 +611,23 @@ class ZylchCLI:
             border_style="cyan"
         ))
 
-    def connect(self, service: Optional[str] = None, reset: bool = False):
-        """Connect or manage service integrations (Google, Microsoft, etc.).
+    def connect(self, service: Optional[str] = None):
+        """Connect a service integration via OAuth (Google, Microsoft, etc.).
+
+        Note: /connect --help, /connect reset, and /connect status are handled
+        by the backend. This method only handles OAuth flows that require a
+        local browser.
 
         Args:
-            service: Service to connect ('google', 'microsoft')
-            reset: If True, disconnect all integrations
+            service: Service to connect ('google', 'microsoft', 'mrcall', etc.)
         """
         if not self.check_auth():
             console.print("❌ Not logged in. Run: /login", style="red")
             return
 
-        # Handle reset (disconnect all)
-        if reset:
-            self._disconnect_all_services()
-            return
-
         # Show status if no service specified
         if not service:
             self._show_connection_status()
-            return
-
-        # Handle --help
-        if service == '--help':
-            self._show_connect_help()
             return
 
         # Route to specific service handlers
@@ -698,32 +697,6 @@ class ZylchCLI:
         except Exception as e:
             console.print(f"❌ Error fetching connections: {e}", style="red")
             console.print("Run /connect {provider} to manage connections")
-
-    def _show_connect_help(self):
-        """Show help for /connect command."""
-        console.print(Panel.fit(
-            """[bold]/connect[/bold] - Manage service integrations
-
-[bold]Usage:[/bold]
-  /connect              Show all connections status
-  /connect <service>    Connect a specific service
-  /connect --reset      Disconnect all services
-  /connect --help       Show this help
-
-[bold]Available services:[/bold]
-  google      Gmail & Calendar (OAuth)
-  microsoft   Outlook & Calendar (OAuth)
-  anthropic   Claude API key
-  mrcall      MrCall integration
-  vonage      Vonage SMS (API key)
-  pipedrive   Pipedrive CRM (API key)
-
-[bold]Examples:[/bold]
-  /connect google       Start Google OAuth
-  /connect status       Same as /connect (show status)""",
-            title="Connect Help",
-            border_style="cyan"
-        ))
 
     def _connect_google(self):
         """Connect Google account via OAuth with local callback."""
@@ -923,7 +896,7 @@ class ZylchCLI:
                 if status.get('has_credentials') and not status.get('expired'):
                     email = status.get('email', 'Unknown')
                     console.print(f"\n✅ Already connected as {email}", style="green")
-                    console.print("To reconnect, run: /connect --reset")
+                    console.print("To reconnect, run: /connect reset google")
                     return
 
             # Use local callback server flow
@@ -950,51 +923,6 @@ class ZylchCLI:
 
         except Exception as e:
             console.print(f"❌ Error connecting {service_name}: {e}", style="red")
-
-    def _disconnect_all_services(self):
-        """Disconnect all service integrations."""
-        console.print(Panel.fit(
-            "[bold]Disconnect All Services[/bold]",
-            title="Disconnect",
-            border_style="yellow"
-        ))
-
-        from rich.prompt import Confirm
-        if not Confirm.ask("\nAre you sure you want to disconnect all services?"):
-            console.print("Cancelled.", style="dim")
-            return
-
-        # Get all connections dynamically
-        try:
-            status_data = self.api_client.get_connections_status(include_unavailable=False)
-            connections = status_data.get('connections', [])
-        except Exception as e:
-            console.print(f"❌ Error fetching connections: {e}", style="red")
-            return
-
-        # Find connected services
-        connected = [c for c in connections if c.get('status') == 'connected']
-
-        if not connected:
-            console.print("ℹ️  No services are currently connected", style="dim")
-            return
-
-        # Disconnect each connected service
-        disconnected_count = 0
-        for conn in connected:
-            provider_key = conn.get('provider_key')
-            display_name = conn.get('display_name', provider_key)
-            try:
-                self.api_client.disconnect_provider(provider_key)
-                console.print(f"✅ {display_name} disconnected", style="green")
-                disconnected_count += 1
-            except Exception as e:
-                console.print(f"⚠️  Error disconnecting {display_name}: {e}", style="yellow")
-
-        if disconnected_count > 0:
-            console.print(f"\n✅ {disconnected_count} service(s) disconnected.", style="green")
-        else:
-            console.print("\n⚠️  No services were disconnected.", style="yellow")
 
     def _show_history(self, session_id: Optional[str] = None):
         """Show chat history."""
