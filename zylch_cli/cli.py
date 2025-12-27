@@ -626,6 +626,11 @@ class ZylchCLI:
             self._show_connection_status()
             return
 
+        # Handle --help
+        if service == '--help':
+            self._show_connect_help()
+            return
+
         # Route to specific service handlers
         service_lower = service.lower()
 
@@ -693,6 +698,32 @@ class ZylchCLI:
         except Exception as e:
             console.print(f"❌ Error fetching connections: {e}", style="red")
             console.print("Run /connect {provider} to manage connections")
+
+    def _show_connect_help(self):
+        """Show help for /connect command."""
+        console.print(Panel.fit(
+            """[bold]/connect[/bold] - Manage service integrations
+
+[bold]Usage:[/bold]
+  /connect              Show all connections status
+  /connect <service>    Connect a specific service
+  /connect --reset      Disconnect all services
+  /connect --help       Show this help
+
+[bold]Available services:[/bold]
+  google      Gmail & Calendar (OAuth)
+  microsoft   Outlook & Calendar (OAuth)
+  anthropic   Claude API key
+  mrcall      MrCall integration
+  vonage      Vonage SMS (API key)
+  pipedrive   Pipedrive CRM (API key)
+
+[bold]Examples:[/bold]
+  /connect google       Start Google OAuth
+  /connect status       Same as /connect (show status)""",
+            title="Connect Help",
+            border_style="cyan"
+        ))
 
     def _connect_google(self):
         """Connect Google account via OAuth with local callback."""
