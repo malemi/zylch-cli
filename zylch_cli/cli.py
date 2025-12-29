@@ -28,6 +28,34 @@ from .oauth_handler import initiate_browser_login, initiate_service_connect
 logger = logging.getLogger(__name__)
 console = Console()
 
+# LLM Provider configurations for /connect command
+LLM_PROVIDERS = {
+    'anthropic': {
+        'display_name': 'Anthropic Claude',
+        'model': 'claude-sonnet-4-20250514',
+        'env_var': 'ANTHROPIC_API_KEY',
+        'key_prefix': 'sk-ant-',
+        'url': 'https://console.anthropic.com/',
+        'features': {'web_search': True, 'prompt_caching': True, 'tool_calling': True}
+    },
+    'openai': {
+        'display_name': 'OpenAI GPT-4',
+        'model': 'gpt-4.1',
+        'env_var': 'OPENAI_API_KEY',
+        'key_prefix': 'sk-',
+        'url': 'https://platform.openai.com/api-keys',
+        'features': {'web_search': False, 'prompt_caching': False, 'tool_calling': True}
+    },
+    'mistral': {
+        'display_name': 'Mistral AI',
+        'model': 'mistral-large-3',
+        'env_var': 'MISTRAL_API_KEY',
+        'key_prefix': '',  # Mistral keys don't have a standard prefix
+        'url': 'https://console.mistral.ai/api-keys/',
+        'features': {'web_search': False, 'prompt_caching': False, 'tool_calling': True, 'eu_based': True}
+    }
+}
+
 # Profile path
 PROFILE_PATH = Path.home() / ".zylch" / "profile"
 DEFAULT_PROFILE = """# Zylch CLI Profile
@@ -637,10 +665,10 @@ class ZylchCLI:
             self._connect_google()
         elif service_lower == 'microsoft':
             self._connect_microsoft()
-        elif service_lower == 'anthropic':
-            self._connect_anthropic()
         elif service_lower == 'mrcall':
             self._connect_mrcall()
+        elif service_lower in ['anthropic', 'openai', 'mistral']:
+            self._connect_llm_provider(service_lower)
         elif service_lower in ['vonage', 'pipedrive']:
             self._connect_api_key_service(service_lower)
         else:
@@ -710,35 +738,59 @@ class ZylchCLI:
         """Connect MrCall account via OAuth with local callback."""
         self._connect_service('mrcall')
 
-    def _connect_anthropic(self):
-        """Set Anthropic API key for AI chat."""
+    def _connect_llm_provider(self, provider: str):
+        """Connect an LLM provider (Anthropic, OpenAI, Mistral) via API key.
+
+        Args:
+            provider: Provider key ('anthropic', 'openai', 'mistral')
+        """
         import os
-        from rich.prompt import Confirm
+        from rich.prompt import Confirm, Prompt
+
+        info = LLM_PROVIDERS.get(provider)
+        if not info:
+            console.print(f"❌ Unknown LLM provider: {provider}", style="red")
+            return
+
+        # Build feature list
+        features = info['features']
+        feature_lines = []
+        feature_lines.append(f"• Tool calling: {'✅' if features.get('tool_calling') else '❌'}")
+        feature_lines.append(f"• Web search: {'✅' if features.get('web_search') else '❌'}")
+        feature_lines.append(f"• Prompt caching: {'✅' if features.get('prompt_caching') else '❌'}")
+        if features.get('eu_based'):
+            feature_lines.append("• EU-based (GDPR compliant): ✅")
 
         console.print(Panel.fit(
-            "[bold]Connect Anthropic API[/bold]\n\n"
-            "Zylch uses Claude AI for chat. You need your own API key.\n\n"
-            "Get your API key at: https://console.anthropic.com/\n\n"
-            "Your key will be stored securely and used for your chats.",
-            title="Anthropic API Key",
+            f"[bold]Connect {info['display_name']}[/bold]\n\n"
+            f"Model: {info['model']}\n\n"
+            f"[bold]Features:[/bold]\n" + "\n".join(feature_lines) + "\n\n"
+            f"Get your API key at: {info['url']}\n\n"
+            f"Your key will be stored securely and used for your chats.",
+            title=info['display_name'],
             border_style="cyan"
         ))
 
         # Check if already configured
         try:
-            status = self.api_client.get_anthropic_status()
-            if status.get('has_key'):
-                console.print("\n✅ API key already configured.", style="green")
+            status = self.api_client.get_connections_status()
+            connections = status.get('connections', [])
+            existing = next((c for c in connections if c.get('provider_key') == provider and c.get('status') == 'connected'), None)
+            if existing:
+                console.print(f"\n✅ {info['display_name']} already connected.", style="green")
                 if not Confirm.ask("Replace with a new key?"):
                     return
         except Exception:
             pass  # Continue to prompt for key
 
         # Check for environment variable first
-        env_key = os.environ.get('ANTHROPIC_API_KEY')
-        if env_key and env_key.startswith('sk-ant-'):
-            masked_key = env_key[:12] + '...' + env_key[-4:]
-            console.print(f"\n Found ANTHROPIC_API_KEY in environment: {masked_key}", style="cyan")
+        env_var = info['env_var']
+        key_prefix = info['key_prefix']
+        env_key = os.environ.get(env_var)
+
+        if env_key and (not key_prefix or env_key.startswith(key_prefix)):
+            masked_key = env_key[:12] + '...' + env_key[-4:] if len(env_key) > 16 else '***'
+            console.print(f"\n Found {env_var} in environment: {masked_key}", style="cyan")
             if Confirm.ask("Use this key?"):
                 api_key = env_key
             else:
@@ -748,9 +800,8 @@ class ZylchCLI:
 
         # Prompt for API key if not using env var
         if not api_key:
-            from rich.prompt import Prompt
             console.print("")
-            api_key = Prompt.ask("Enter your Anthropic API key", password=True)
+            api_key = Prompt.ask(f"Enter your {info['display_name']} API key", password=True)
 
             if not api_key or not api_key.strip():
                 console.print("❌ No API key provided.", style="red")
@@ -758,19 +809,22 @@ class ZylchCLI:
 
         api_key = api_key.strip()
 
-        # Validate format
-        if not api_key.startswith('sk-ant-'):
-            console.print("⚠️  Warning: API key doesn't look like an Anthropic key (should start with 'sk-ant-')", style="yellow")
-            from rich.prompt import Confirm
+        # Validate format (if prefix is specified)
+        if key_prefix and not api_key.startswith(key_prefix):
+            console.print(f"⚠️  Warning: API key doesn't look like a {info['display_name']} key (should start with '{key_prefix}')", style="yellow")
             if not Confirm.ask("Continue anyway?"):
                 return
 
-        # Save to server
+        # Save to server using unified credentials API
         try:
-            result = self.api_client.set_anthropic_key(api_key)
+            result = self.api_client.save_provider_credentials(provider, {"api_key": api_key})
             if result.get('success'):
-                console.print("\n✅ Anthropic API key saved!", style="green")
-                console.print("You can now use Zylch chat.")
+                console.print(f"\n✅ {info['display_name']} connected!", style="green")
+                console.print("You can now use Zylch chat with this provider.")
+
+                # Show feature notes for non-Anthropic providers
+                if provider != 'anthropic':
+                    console.print("\n[dim]Note: Web search and prompt caching are Anthropic-only features.[/dim]")
             else:
                 console.print(f"\n❌ Failed to save API key: {result.get('error', 'Unknown error')}", style="red")
         except Exception as e:
