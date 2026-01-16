@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "zylch-cli"
-version = "0.9.0"
+version = "0.9.1"
 description = "Thin CLI client for Zylch AI - connects to Zylch API server"
 readme = "README.md"
 license = {text = "MIT"}
