@@ -240,12 +240,25 @@ class OAuthCallbackHandler(BaseHTTPRequestHandler):
             response = requests.get(callback_url, headers=headers, params=params, timeout=30)
 
             if response.status_code == 200:
-                # Success - tokens exchanged and stored on backend
-                OAuthCallbackHandler.received_data = {
-                    'success': True,
-                    'service': service,
-                    'message': f'{service.capitalize()} connected successfully'
-                }
+                # Success - try to parse JSON response for email and business info
+                try:
+                    data = response.json()
+                    OAuthCallbackHandler.received_data = {
+                        'success': True,
+                        'service': service,
+                        'email': data.get('email'),
+                        'business_id': data.get('business_id'),
+                        'nickname': data.get('nickname'),
+                        'company_name': data.get('company_name'),
+                        'message': data.get('message', f'{service.capitalize()} connected successfully')
+                    }
+                except:
+                    # Fallback for HTML response (browser redirect case)
+                    OAuthCallbackHandler.received_data = {
+                        'success': True,
+                        'service': service,
+                        'message': f'{service.capitalize()} connected successfully'
+                    }
                 self._send_success_response(f"{service.capitalize()} Connected!",
                     f"Successfully connected {service.capitalize()}.<br>Return to your terminal.")
             else:

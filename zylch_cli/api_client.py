@@ -545,3 +545,25 @@ class ZylchAPIClient:
             "DELETE",
             f"/api/connections/provider/{provider_key}/credentials"
         )
+
+    def get_provider_info(self, provider_key: str) -> Dict[str, Any]:
+        """Get detailed information about a specific provider.
+
+        Used by CLI to dynamically build connection forms based on config_fields.
+
+        Args:
+            provider_key: Provider identifier (vonage, sendgrid, anthropic, etc.)
+
+        Returns:
+            Provider info including:
+            - provider_key: Provider identifier
+            - display_name: User-friendly name
+            - category: Provider category (email, ai, messaging, etc.)
+            - requires_oauth: Whether OAuth flow is required
+            - documentation_url: Link to setup docs
+            - config_fields: Dict of fields with type, label, required, env_var
+
+        Raises:
+            ZylchAPIError: If provider not found (404)
+        """
+        return self._request("GET", f"/api/connections/providers/{provider_key}")

@@ -56,6 +56,76 @@ LLM_PROVIDERS = {
     }
 }
 
+
+def validate_llm_api_key(provider: str, api_key: str) -> tuple[bool, str]:
+    """Validate an LLM provider API key by making a minimal test request.
+
+    Args:
+        provider: Provider name ('anthropic', 'openai', 'mistral')
+        api_key: The API key to validate
+
+    Returns:
+        Tuple of (is_valid, error_message). If valid, error_message is empty.
+    """
+    import requests
+
+    try:
+        if provider == "anthropic":
+            resp = requests.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json"
+                },
+                json={
+                    "model": "claude-3-haiku-20240307",
+                    "max_tokens": 1,
+                    "messages": [{"role": "user", "content": "hi"}]
+                },
+                timeout=15
+            )
+            if resp.status_code == 401:
+                return False, "Invalid or expired API key"
+            if resp.status_code == 200:
+                return True, ""
+            return False, f"Unexpected response: {resp.status_code}"
+
+        elif provider == "openai":
+            resp = requests.get(
+                "https://api.openai.com/v1/models",
+                headers={"Authorization": f"Bearer {api_key}"},
+                timeout=15
+            )
+            if resp.status_code == 401:
+                return False, "Invalid or expired API key"
+            if resp.status_code == 200:
+                return True, ""
+            return False, f"Unexpected response: {resp.status_code}"
+
+        elif provider == "mistral":
+            resp = requests.get(
+                "https://api.mistral.ai/v1/models",
+                headers={"Authorization": f"Bearer {api_key}"},
+                timeout=15
+            )
+            if resp.status_code == 401:
+                return False, "Invalid or expired API key"
+            if resp.status_code == 200:
+                return True, ""
+            return False, f"Unexpected response: {resp.status_code}"
+
+        else:
+            return False, f"Unknown provider: {provider}"
+
+    except requests.exceptions.Timeout:
+        return False, "Connection timeout - please try again"
+    except requests.exceptions.ConnectionError:
+        return False, "Connection error - please check your internet"
+    except Exception as e:
+        return False, f"Validation error: {str(e)}"
+
+
 # Profile path
 PROFILE_PATH = Path.home() / ".zylch" / "profile"
 DEFAULT_PROFILE = """# Zylch CLI Profile
@@ -413,15 +483,29 @@ class ZylchCLI:
             multiline=True
         )
 
+        last_was_eof = False  # Track consecutive Ctrl+D
+
         try:
             while True:
                 # Get user input with history and autocomplete
                 try:
                     console.print()  # Newline before prompt
                     user_input = prompt_session.prompt('You: ')
-                except (KeyboardInterrupt, EOFError):
-                    console.print("\n\n👋 Goodbye!", style="yellow")
-                    break
+                    last_was_eof = False  # Reset on successful input
+                except KeyboardInterrupt:
+                    # Ctrl+C: just cancel current input, don't exit
+                    console.print("\n(Ctrl+C to cancel, Ctrl+D twice to exit)", style="dim")
+                    last_was_eof = False
+                    continue
+                except EOFError:
+                    # Ctrl+D: require twice to exit (like Claude Code)
+                    if last_was_eof:
+                        console.print("\n\n👋 Goodbye!", style="yellow")
+                        break
+                    else:
+                        console.print("\n(Press Ctrl+D again to exit)", style="dim yellow")
+                        last_was_eof = True
+                        continue
 
                 # Check for empty input
                 if not user_input.strip():
@@ -669,13 +753,9 @@ class ZylchCLI:
             self._connect_mrcall()
         elif service_lower in ['anthropic', 'openai', 'mistral']:
             self._connect_llm_provider(service_lower)
-        elif service_lower in ['vonage', 'pipedrive']:
-            self._connect_api_key_service(service_lower)
         else:
-            # Unknown service - show available providers
-            console.print(f"❌ Unknown service: {service}", style="red")
-            console.print("\nAvailable services:")
-            self._show_connection_status()
+            # Try to connect via dynamic provider info from backend
+            self._connect_api_key_service(service_lower)
 
     def _show_connection_status(self):
         """Show status of all service connections from backend API."""
@@ -815,6 +895,17 @@ class ZylchCLI:
             if not Confirm.ask("Continue anyway?"):
                 return
 
+        # Validate API key by making a test request
+        console.print(f"\n[dim]Validating API key with {info['display_name']}...[/dim]")
+        is_valid, error_msg = validate_llm_api_key(provider, api_key)
+
+        if not is_valid:
+            console.print(f"\n❌ **Invalid API key**: {error_msg}", style="red")
+            console.print(f"\nPlease check your key at: {info['url']}", style="yellow")
+            return
+
+        console.print("[green]✓ API key validated[/green]")
+
         # Save to server using unified credentials API
         try:
             result = self.api_client.save_provider_credentials(provider, {"api_key": api_key})
@@ -831,56 +922,78 @@ class ZylchCLI:
             console.print(f"\n❌ Error saving API key: {e}", style="red")
 
     def _connect_api_key_service(self, service: str):
-        """Connect an API key-based service (Vonage, Pipedrive, etc.).
+        """Connect an API key-based service dynamically from backend config.
+
+        Fetches provider info from backend and builds form dynamically.
+        No hardcoded service list - adding new providers only requires DB migration.
 
         Args:
-            service: Service name (vonage, pipedrive, etc.)
+            service: Service name (vonage, pipedrive, sendgrid, etc.)
         """
         import os
         from rich.prompt import Prompt, Confirm
 
-        service_info = {
-            'vonage': {
-                'display_name': 'Vonage SMS',
-                'description': 'Send SMS messages via Vonage',
-                'url': 'https://dashboard.nexmo.com/',
-                'fields': [
-                    {'name': 'api_key', 'label': 'API Key', 'env_var': 'VONAGE_API_KEY'},
-                    {'name': 'api_secret', 'label': 'API Secret', 'env_var': 'VONAGE_API_SECRET'},
-                    {'name': 'from_number', 'label': 'From Number', 'env_var': 'VONAGE_FROM_NUMBER'}
-                ]
-            },
-            'pipedrive': {
-                'display_name': 'Pipedrive CRM',
-                'description': 'Sync contacts and deals with Pipedrive',
-                'url': 'https://app.pipedrive.com/settings/api',
-                'fields': [
-                    {'name': 'api_token', 'label': 'API Token', 'env_var': 'PIPEDRIVE_API_TOKEN'}
-                ]
-            }
-        }
+        # Fetch provider info from backend
+        try:
+            provider_info = self.api_client.get_provider_info(service)
+        except Exception as e:
+            error_msg = str(e)
+            if '404' in error_msg or 'not found' in error_msg.lower():
+                console.print(f"❌ Unknown service: {service}", style="red")
+                console.print("\nAvailable services:")
+                self._show_connection_status()
+            else:
+                console.print(f"❌ Error fetching provider info: {e}", style="red")
+            return
 
-        info = service_info.get(service)
-        if not info:
-            console.print(f"❌ Configuration not available for {service}", style="red")
+        # Check if provider requires OAuth (shouldn't reach here, but safety check)
+        if provider_info.get('requires_oauth'):
+            console.print(f"❌ {provider_info.get('display_name', service)} requires OAuth flow", style="red")
+            console.print(f"Use: /connect {service}")
+            return
+
+        # Check if provider is available
+        if not provider_info.get('is_available', True):
+            console.print(f"⏳ {provider_info.get('display_name', service)} is coming soon!", style="yellow")
+            return
+
+        display_name = provider_info.get('display_name', service.title())
+        description = provider_info.get('description', '')
+        doc_url = provider_info.get('documentation_url', '')
+        config_fields = provider_info.get('config_fields', {})
+
+        # Convert config_fields dict to list format for processing
+        fields = []
+        for field_name, field_config in config_fields.items():
+            fields.append({
+                'name': field_name,
+                'label': field_config.get('label', field_name),
+                'env_var': field_config.get('env_var'),
+                'required': field_config.get('required', True),
+                'encrypted': field_config.get('encrypted', False)
+            })
+
+        if not fields:
+            console.print(f"❌ No configuration fields defined for {service}", style="red")
             return
 
         # Build env var hint
-        env_vars = [f.get('env_var') for f in info['fields'] if f.get('env_var')]
+        env_vars = [f.get('env_var') for f in fields if f.get('env_var')]
         env_hint = f"\n\n[dim]Tip: Set {', '.join(env_vars)} to auto-detect[/dim]" if env_vars else ""
 
-        console.print(Panel.fit(
-            f"[bold]Connect {info['display_name']}[/bold]\n\n"
-            f"{info['description']}\n\n"
-            f"Get your credentials at: {info['url']}"
-            f"{env_hint}",
-            title=info['display_name'],
-            border_style="cyan"
-        ))
+        # Build panel content
+        panel_content = f"[bold]Connect {display_name}[/bold]"
+        if description:
+            panel_content += f"\n\n{description}"
+        if doc_url:
+            panel_content += f"\n\nGet your credentials at: {doc_url}"
+        panel_content += env_hint
+
+        console.print(Panel.fit(panel_content, title=display_name, border_style="cyan"))
 
         # Check for environment variables
         env_credentials = {}
-        for field in info['fields']:
+        for field in fields:
             env_var = field.get('env_var')
             if env_var:
                 value = os.environ.get(env_var)
@@ -891,12 +1004,13 @@ class ZylchCLI:
         credentials = {}
         if env_credentials:
             console.print(f"\n Found {len(env_credentials)} environment variable(s):", style="cyan")
-            for field in info['fields']:
+            for field in fields:
                 env_var = field.get('env_var')
                 value = env_credentials.get(field['name'])
                 if value:
-                    # Mask sensitive values
-                    if field['name'] in ['api_secret', 'api_token', 'api_key']:
+                    # Mask sensitive values (encrypted fields or known sensitive names)
+                    is_sensitive = field.get('encrypted') or field['name'] in ['api_secret', 'api_token', 'api_key']
+                    if is_sensitive:
                         masked = value[:4] + '...' + value[-4:] if len(value) > 8 else '***'
                     else:
                         masked = value
@@ -906,22 +1020,30 @@ class ZylchCLI:
                 credentials = env_credentials.copy()
 
         # Prompt for any missing credentials
-        for field in info['fields']:
+        for field in fields:
             if field['name'] not in credentials:
-                value = Prompt.ask(f"\n{field['label']}", password=(field['name'] in ['api_secret', 'api_token']))
-                if not value:
+                # Skip optional fields if user presses Enter
+                is_required = field.get('required', True)
+                is_sensitive = field.get('encrypted') or field['name'] in ['api_secret', 'api_token', 'api_key']
+
+                label = field['label']
+                if not is_required:
+                    label += " (press Enter to skip)"
+
+                value = Prompt.ask(f"\n{label}", password=is_sensitive, default="" if not is_required else ...)
+
+                if not value and is_required:
                     console.print("❌ Setup cancelled.", style="yellow")
                     return
-                credentials[field['name']] = value.strip()
+
+                if value:
+                    credentials[field['name']] = value.strip()
 
         # Save to server
         try:
             result = self.api_client.save_provider_credentials(service, credentials)
             if result.get('success'):
-                console.print(f"\n✅ {info['display_name']} connected successfully!", style="green")
-                if service == 'vonage':
-                    console.print("You can now send SMS messages via the agent.")
-                    console.print("Try: \"Send an SMS to +1234567890 saying hello\"")
+                console.print(f"\n✅ {display_name} connected successfully!", style="green")
             else:
                 console.print(f"\n⚠️  {result.get('message', 'Unknown error')}", style="yellow")
         except Exception as e:
