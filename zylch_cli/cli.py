@@ -484,13 +484,15 @@ class ZylchCLI:
         )
 
         last_was_eof = False  # Track consecutive Ctrl+D
+        mrcall_mode = False  # Track MrCall config mode for prompt indicator
 
         try:
             while True:
                 # Get user input with history and autocomplete
                 try:
                     console.print()  # Newline before prompt
-                    user_input = prompt_session.prompt('You: ')
+                    prompt_prefix = '(mrcall) You: ' if mrcall_mode else 'You: '
+                    user_input = prompt_session.prompt(prompt_prefix)
                     last_was_eof = False  # Reset on successful input
                 except KeyboardInterrupt:
                     # Ctrl+C: just cancel current input, don't exit
@@ -585,8 +587,12 @@ class ZylchCLI:
                     assistant_response = response.get('response', '')
                     console.print(f"\n[bold green]Zylch[/bold green]: {assistant_response}")
 
-                    # Show timing for commands or in debug mode
+                    # Update MrCall config mode from server metadata
                     metadata = response.get('metadata', {})
+                    if 'mrcall_config_mode' in metadata:
+                        mrcall_mode = metadata['mrcall_config_mode']
+
+                    # Show timing for commands or in debug mode
                     if user_input.startswith('/') or logger.level <= logging.DEBUG:
                         server_time = metadata.get('execution_time_ms', 0) / 1000
                         console.print(f"\n[dim]⏱ {elapsed:.1f}s total ({server_time:.1f}s server)[/dim]")
