@@ -451,7 +451,7 @@ def initiate_browser_login(server_url: str, callback_port: int = 8765) -> Option
     # Build OAuth initiation URL
     callback_url = f"http://localhost:{callback_port}/callback"
     base_url = server_url.rstrip('/')
-    oauth_url = f"{base_url}/api/auth/oauth/initiate?callback_url={callback_url}"
+    oauth_url = f"{base_url}/api/auth/oauth/initiate?callback_url={callback_url}&force=true"
 
     # Open browser
     print(f"\n🔐 Opening browser for authentication...")
